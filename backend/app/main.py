@@ -77,6 +77,7 @@ mongo_client = MongoClient(MONGODB_URI)
 mongo_db = mongo_client[MONGODB_DB_NAME]
 chat_collection = mongo_db["chats"]
 user_collection = mongo_db["users"]
+session_collection = mongo_db["sessions"]
 
 
 class ChatMessage(BaseModel):
@@ -121,6 +122,20 @@ def _normalize_email(value: str) -> str:
     return value.strip().lower()
 
 
+def _create_indexes() -> None:
+    user_collection.create_index("email", unique=True)
+    session_collection.create_index("token", unique=True)
+    session_collection.create_index("user_id")
+    session_collection.create_index("created_at")
+    chat_collection.create_index("owner_id")
+    chat_collection.create_index("updated_at")
+    chat_collection.create_index([("owner_id", 1), ("updated_at", -1)])
+    chat_collection.create_index([("title", "text"), ("messages.content", "text")])
+
+
+_create_indexes()
+
+
 def _hash_password(password: str, salt: str | None = None) -> str:
     resolved_salt = salt or secrets.token_hex(16)
     digest = pbkdf2_hmac(
@@ -140,6 +155,17 @@ def _verify_password(password: str, password_hash: str) -> bool:
     return candidate.split("$", 1)[1] == stored_digest
 
 
+def _new_session(user_id: ObjectId) -> dict[str, Any]:
+    token = secrets.token_urlsafe(32)
+    document = {
+        "user_id": user_id,
+        "token": token,
+        "created_at": _utc_now(),
+    }
+    session_collection.insert_one(document)
+    return document
+
+
 def _serialize_user(document: dict[str, Any]) -> dict[str, str]:
     return {
         "id": str(document["_id"]),
@@ -149,10 +175,28 @@ def _serialize_user(document: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _get_user_or_401(user_id: str | None) -> dict[str, Any]:
-    if not user_id or not ObjectId.is_valid(user_id):
+def _resolve_session_token(
+    x_session_token: str | None,
+    authorization: str | None,
+) -> str | None:
+    if x_session_token and x_session_token.strip():
+        return x_session_token.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
+
+
+def _get_user_or_401(
+    x_session_token: str | None,
+    authorization: str | None,
+) -> dict[str, Any]:
+    token = _resolve_session_token(x_session_token, authorization)
+    if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    user = user_collection.find_one({"_id": ObjectId(user_id)})
+    session = session_collection.find_one({"token": token})
+    if not session:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user = user_collection.find_one({"_id": session["user_id"]})
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return user
@@ -469,7 +513,8 @@ def signup(payload: SignupRequest):
     }
     result = user_collection.insert_one(document)
     created = user_collection.find_one({"_id": result.inserted_id})
-    return {"user": _serialize_user(created)}
+    session = _new_session(created["_id"])
+    return {"user": _serialize_user(created), "session_token": session["token"]}
 
 
 @app.post("/api/auth/login")
@@ -478,18 +523,37 @@ def login(payload: LoginRequest):
     user = user_collection.find_one({"email": email})
     if not user or not _verify_password(payload.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return {"user": _serialize_user(user)}
+    session = _new_session(user["_id"])
+    return {"user": _serialize_user(user), "session_token": session["token"]}
 
 
 @app.get("/api/auth/me")
-def me(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
-    user = _get_user_or_401(x_user_id)
+def me(
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    user = _get_user_or_401(x_session_token, authorization)
     return {"user": _serialize_user(user)}
 
 
+@app.post("/api/auth/logout")
+def logout(
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    token = _resolve_session_token(x_session_token, authorization)
+    if token:
+        session_collection.delete_one({"token": token})
+    return {"ok": True}
+
+
 @app.get("/api/chats")
-def list_chats(q: str = "", x_user_id: str | None = Header(default=None, alias="X-User-Id")):
-    user = _get_user_or_401(x_user_id)
+def list_chats(
+    q: str = "",
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    user = _get_user_or_401(x_session_token, authorization)
     query: dict[str, Any] = {"owner_id": user["_id"]}
     if q.strip():
         regex = {"$regex": q.strip(), "$options": "i"}
@@ -506,8 +570,12 @@ def list_chats(q: str = "", x_user_id: str | None = Header(default=None, alias="
 
 
 @app.post("/api/chats")
-def create_chat(payload: CreateChatRequest, x_user_id: str | None = Header(default=None, alias="X-User-Id")):
-    user = _get_user_or_401(x_user_id)
+def create_chat(
+    payload: CreateChatRequest,
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    user = _get_user_or_401(x_session_token, authorization)
     now = _utc_now()
     title = payload.title.strip() if payload.title else "New chat"
     document = {
@@ -524,8 +592,12 @@ def create_chat(payload: CreateChatRequest, x_user_id: str | None = Header(defau
 
 
 @app.get("/api/chats/{chat_id}")
-def get_chat(chat_id: str, x_user_id: str | None = Header(default=None, alias="X-User-Id")):
-    user = _get_user_or_401(x_user_id)
+def get_chat(
+    chat_id: str,
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    user = _get_user_or_401(x_session_token, authorization)
     document = _get_chat_or_404(chat_id, str(user["_id"]))
     return _serialize_chat(document, include_messages=True)
 
@@ -534,9 +606,10 @@ def get_chat(chat_id: str, x_user_id: str | None = Header(default=None, alias="X
 async def send_message(
     chat_id: str,
     payload: SendMessageRequest,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ):
-    user = _get_user_or_401(x_user_id)
+    user = _get_user_or_401(x_session_token, authorization)
     document = _get_chat_or_404(chat_id, str(user["_id"]))
     model_name = (payload.model or document.get("model") or DEFAULT_GEMINI_MODEL).strip()
     return StreamingResponse(

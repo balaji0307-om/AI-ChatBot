@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
-const AUTH_STORAGE_KEY = "nova_scribe_user";
+import { api } from "./api";
+import { useAppStore } from "./store";
+import type { ChatMessage } from "./types";
 
 const MODEL_OPTIONS = [
   "gemini-2.5-flash",
@@ -27,7 +27,7 @@ function LogoMark() {
   );
 }
 
-function formatTime(value) {
+function formatTime(value: string) {
   if (!value) return "";
   const date = new Date(value);
   return date.toLocaleDateString(undefined, {
@@ -36,34 +36,95 @@ function formatTime(value) {
   });
 }
 
-function loadStoredUser() {
-  try {
-    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+function renderInlineMarkdown(text: string) {
+  const normalized = text.replace(/^\*\s+/, "");
+  const parts = normalized.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={`${part}-${index}`}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={`${part}-${index}`}>{part}</span>;
+  });
+}
+
+function renderMessageContent(content: string) {
+  const blocks = content
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  return blocks.map((block, blockIndex) => {
+    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+    const listLines = lines.filter((line) => /^[-*]\s+/.test(line));
+
+    if (listLines.length === lines.length) {
+      return (
+        <ul key={`list-${blockIndex}`} className="message-list-block">
+          {lines.map((line, lineIndex) => (
+            <li key={`item-${blockIndex}-${lineIndex}`}>{renderInlineMarkdown(line)}</li>
+          ))}
+        </ul>
+      );
+    }
+
+    if (lines.length === 1) {
+      return (
+        <p key={`p-${blockIndex}`} className="message-paragraph">
+          {renderInlineMarkdown(lines[0])}
+        </p>
+      );
+    }
+
+    return (
+      <div key={`group-${blockIndex}`} className="message-group">
+        {lines.map((line, lineIndex) => (
+          <p key={`line-${blockIndex}-${lineIndex}`} className="message-paragraph">
+            {renderInlineMarkdown(line)}
+          </p>
+        ))}
+      </div>
+    );
+  });
 }
 
 export default function App() {
-  const [authMode, setAuthMode] = useState("signup");
+  const {
+    currentUser,
+    sessionToken,
+    chats,
+    activeChatId,
+    messages,
+    selectedModel,
+    theme,
+    searchTerm,
+    isStreaming,
+    isBooting,
+    errorText,
+    statusText,
+    setAuth,
+    clearAuth,
+    setChats,
+    setActiveChatId,
+    setMessages,
+    appendMessages,
+    replaceAssistantMessage,
+    setSelectedModel,
+    setTheme,
+    setSearchTerm,
+    setIsStreaming,
+    setIsBooting,
+    setErrorText,
+    setStatusText
+  } = useAppStore();
+
+  const [authMode, setAuthMode] = useState<"signup" | "login">("signup");
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
-  const [currentUser, setCurrentUser] = useState(() => loadStoredUser());
-
-  const [chats, setChats] = useState([]);
-  const [activeChatId, setActiveChatId] = useState("");
-  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [isBooting, setIsBooting] = useState(true);
-  const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0]);
-  const [errorText, setErrorText] = useState("");
-  const [statusText, setStatusText] = useState("Connected workspace");
-  const abortRef = useRef(null);
-  const bottomRef = useRef(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const activeChat = useMemo(
     () => chats.find((chat) => chat.id === activeChatId) ?? null,
@@ -75,26 +136,24 @@ export default function App() {
   }, [messages, isStreaming]);
 
   useEffect(() => {
-    if (!currentUser) {
-      setChats([]);
-      setActiveChatId("");
-      setMessages([]);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    if (!currentUser || !sessionToken) {
       setIsBooting(false);
       return;
     }
 
+    const token = sessionToken;
     let cancelled = false;
-
     async function bootstrap() {
       setIsBooting(true);
       try {
-        const data = await fetchJson(`${API_BASE}/api/chats`, {
-          headers: authHeaders(currentUser)
-        });
+        const data = await api.listChats(token);
         if (cancelled) return;
-
         if (!data.items.length) {
-          const created = await createChat(currentUser);
+          const created = await api.createChat(token);
           if (cancelled) return;
           setChats([created]);
           setActiveChatId(created.id);
@@ -106,7 +165,7 @@ export default function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setErrorText(error.message || "Failed to load chat history.");
+          setErrorText(error instanceof Error ? error.message : "Failed to load chat history.");
         }
       } finally {
         if (!cancelled) {
@@ -119,164 +178,121 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentUser]);
+  }, [currentUser, sessionToken, setActiveChatId, setChats, setErrorText, setIsBooting, setMessages, setSelectedModel]);
 
   useEffect(() => {
-    if (!activeChatId || !currentUser) return;
+    if (!activeChatId || !sessionToken) return;
+    const token = sessionToken;
     let cancelled = false;
-
     async function loadChat() {
       try {
-        const chat = await fetchJson(`${API_BASE}/api/chats/${activeChatId}`, {
-          headers: authHeaders(currentUser)
-        });
+        const chat = await api.getChat(token, activeChatId);
         if (cancelled) return;
         setMessages(chat.messages || []);
         setSelectedModel(chat.model || MODEL_OPTIONS[0]);
       } catch (error) {
         if (!cancelled) {
-          setErrorText(error.message || "Failed to load this chat.");
+          setErrorText(error instanceof Error ? error.message : "Failed to load this chat.");
         }
       }
     }
-
     loadChat();
     return () => {
       cancelled = true;
     };
-  }, [activeChatId, currentUser]);
+  }, [activeChatId, sessionToken, setErrorText, setMessages, setSelectedModel]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (!sessionToken) return;
+    const token = sessionToken;
     const timer = setTimeout(async () => {
       try {
-        const data = await fetchJson(
-          `${API_BASE}/api/chats${searchTerm.trim() ? `?q=${encodeURIComponent(searchTerm.trim())}` : ""}`,
-          { headers: authHeaders(currentUser) }
-        );
+        const data = await api.listChats(token, searchTerm);
         setChats(data.items || []);
       } catch (error) {
-        setErrorText(error.message || "Failed to search chats.");
+        setErrorText(error instanceof Error ? error.message : "Failed to search chats.");
       }
     }, 180);
 
     return () => clearTimeout(timer);
-  }, [searchTerm, currentUser]);
-
-  function authHeaders(user, extra = {}) {
-    return {
-      ...extra,
-      "X-User-Id": user.id
-    };
-  }
-
-  async function fetchJson(url, options) {
-    const response = await fetch(url, options);
-    if (!response.ok) {
-      let message = "Request failed.";
-      try {
-        const data = await response.json();
-        message = data.error || data.detail || message;
-      } catch {
-        message = "Request failed.";
-      }
-      throw new Error(message);
-    }
-    return response.json();
-  }
+  }, [searchTerm, sessionToken, setChats, setErrorText]);
 
   async function refreshChats(preferredId = activeChatId) {
-    if (!currentUser) return;
-    const data = await fetchJson(
-      `${API_BASE}/api/chats${searchTerm.trim() ? `?q=${encodeURIComponent(searchTerm.trim())}` : ""}`,
-      { headers: authHeaders(currentUser) }
-    );
+    if (!sessionToken) return;
+    const token = sessionToken;
+    const data = await api.listChats(token, searchTerm);
     setChats(data.items || []);
     if (preferredId) {
       const exists = (data.items || []).some((chat) => chat.id === preferredId);
-      if (!exists && data.items?.length) {
+      if (!exists && data.items.length) {
         setActiveChatId(data.items[0].id);
       }
     }
   }
 
-  async function createChat(user) {
-    return fetchJson(`${API_BASE}/api/chats`, {
-      method: "POST",
-      headers: {
-        ...authHeaders(user),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ title: "New chat" })
-    });
-  }
-
-  async function handleAuthSubmit(event) {
+  async function handleAuthSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthLoading(true);
     setAuthError("");
-
-    const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
-    const payload =
-      authMode === "signup"
-        ? authForm
-        : { email: authForm.email, password: authForm.password };
-
     try {
-      const data = await fetchJson(`${API_BASE}${endpoint}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data.user));
-      setCurrentUser(data.user);
+      const data =
+        authMode === "signup"
+          ? await api.signup(authForm)
+          : await api.login({ email: authForm.email, password: authForm.password });
+      setAuth({ user: data.user, sessionToken: data.session_token });
       setAuthForm({ name: "", email: "", password: "" });
-      setStatusText("Connected workspace");
-      setErrorText("");
     } catch (error) {
-      setAuthError(error.message || "Authentication failed.");
+      setAuthError(error instanceof Error ? error.message : "Authentication failed.");
     } finally {
       setAuthLoading(false);
     }
   }
 
-  function handleLogout() {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
-    setCurrentUser(null);
+  async function handleLogout() {
+    if (sessionToken) {
+      try {
+        await api.logout(sessionToken);
+      } catch {
+        // ignore logout cleanup failures
+      }
+    }
+    clearAuth();
     setAuthMode("login");
-    setSearchTerm("");
     setInput("");
-    setErrorText("");
-    setStatusText("Connected workspace");
   }
 
   async function handleNewChat() {
-    if (!currentUser) return;
+    if (!sessionToken) return;
     try {
       setErrorText("");
-      const created = await createChat(currentUser);
+      const created = await api.createChat(sessionToken);
       await refreshChats(created.id);
       setActiveChatId(created.id);
       setMessages([]);
       setInput("");
       setStatusText("Fresh conversation ready");
     } catch (error) {
-      setErrorText(error.message || "Failed to create a new chat.");
+      setErrorText(error instanceof Error ? error.message : "Failed to create a new chat.");
     }
   }
 
-  async function handleSelectChat(chatId) {
+  async function handleSelectChat(chatId: string) {
     if (isStreaming || chatId === activeChatId) return;
     setErrorText("");
     setActiveChatId(chatId);
   }
 
-  async function streamChatResponse(chatId, payload, assistantId, signal) {
-    const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages/stream`, {
+  async function streamChatResponse(
+    chatId: string,
+    payload: { content: string; model: string; temperature: number; simulate_stream: boolean },
+    assistantId: string,
+    signal: AbortSignal
+  ) {
+    const response = await fetch(`/api/chats/${chatId}/messages/stream`, {
       method: "POST",
       headers: {
-        ...authHeaders(currentUser),
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "X-Session-Token": sessionToken ?? ""
       },
       body: JSON.stringify(payload),
       signal
@@ -306,7 +322,6 @@ export default function App() {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
       const events = buffer.split("\n\n");
       buffer = events.pop() ?? "";
 
@@ -316,15 +331,10 @@ export default function App() {
           if (!line.startsWith("data:")) continue;
           const raw = line.slice(5).trim();
           if (!raw) continue;
-
-          const packet = JSON.parse(raw);
+          const packet = JSON.parse(raw) as { type: string; value: string };
           if (packet.type === "chunk") {
             textSoFar += packet.value;
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId ? { ...msg, content: textSoFar } : msg
-              )
-            );
+            replaceAssistantMessage(assistantId, textSoFar);
           }
           if (packet.type === "notice") {
             setErrorText(packet.value || "Gemini returned a notice.");
@@ -342,7 +352,7 @@ export default function App() {
 
   async function handleSend() {
     const trimmed = input.trim();
-    if (!trimmed || isStreaming || !currentUser) return;
+    if (!trimmed || isStreaming || !sessionToken) return;
 
     try {
       setErrorText("");
@@ -350,17 +360,17 @@ export default function App() {
 
       let chatId = activeChatId;
       if (!chatId) {
-        const created = await createChat(currentUser);
+        const created = await api.createChat(sessionToken);
         chatId = created.id;
         setActiveChatId(chatId);
         await refreshChats(chatId);
       }
 
-      const userMessage = { id: makeId(), role: "user", content: trimmed };
+      const userMessage: ChatMessage = { id: makeId(), role: "user", content: trimmed };
       const assistantId = makeId();
-      const assistantMessage = { id: assistantId, role: "assistant", content: "" };
+      const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", content: "" };
 
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      appendMessages([userMessage, assistantMessage]);
       setInput("");
       setIsStreaming(true);
 
@@ -379,18 +389,16 @@ export default function App() {
         controller.signal
       );
 
-      const refreshedChat = await fetchJson(`${API_BASE}/api/chats/${chatId}`, {
-        headers: authHeaders(currentUser)
-      });
+      const refreshedChat = await api.getChat(sessionToken, chatId);
       setMessages(refreshedChat.messages || []);
       await refreshChats(chatId);
       setStatusText("Response complete");
     } catch (error) {
-      if (error?.name !== "AbortError") {
-        setErrorText(error.message || "Failed to get a response.");
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setErrorText(error instanceof Error ? error.message : "Failed to get a response.");
       }
-      setMessages((prev) =>
-        prev.map((msg) =>
+      setMessages(
+        messages.map((msg) =>
           msg.role === "assistant" && !msg.content
             ? { ...msg, content: "The response was interrupted. Please try again." }
             : msg
@@ -409,10 +417,10 @@ export default function App() {
     setStatusText("Stopped");
   }
 
-  function onInputKeyDown(event) {
+  function onInputKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      handleSend();
+      void handleSend();
     }
   }
 
@@ -480,9 +488,7 @@ export default function App() {
                 <span>Name</span>
                 <input
                   value={authForm.name}
-                  onChange={(event) =>
-                    setAuthForm((prev) => ({ ...prev, name: event.target.value }))
-                  }
+                  onChange={(event) => setAuthForm((prev) => ({ ...prev, name: event.target.value }))}
                   placeholder="Enter your name"
                   required
                 />
@@ -494,9 +500,7 @@ export default function App() {
               <input
                 type="email"
                 value={authForm.email}
-                onChange={(event) =>
-                  setAuthForm((prev) => ({ ...prev, email: event.target.value }))
-                }
+                onChange={(event) => setAuthForm((prev) => ({ ...prev, email: event.target.value }))}
                 placeholder="Enter your email"
                 required
               />
@@ -507,9 +511,7 @@ export default function App() {
               <input
                 type="password"
                 value={authForm.password}
-                onChange={(event) =>
-                  setAuthForm((prev) => ({ ...prev, password: event.target.value }))
-                }
+                onChange={(event) => setAuthForm((prev) => ({ ...prev, password: event.target.value }))}
                 placeholder="Enter your password"
                 required
               />
@@ -547,7 +549,7 @@ export default function App() {
           </button>
         </div>
 
-        <button type="button" className="primary-action" onClick={handleNewChat}>
+        <button type="button" className="primary-action" onClick={() => void handleNewChat()}>
           <span className="action-icon">+</span>
           <span>New chat</span>
         </button>
@@ -573,16 +575,14 @@ export default function App() {
                 key={chat.id}
                 type="button"
                 className={`history-item ${chat.id === activeChatId ? "is-active" : ""}`}
-                onClick={() => handleSelectChat(chat.id)}
+                onClick={() => void handleSelectChat(chat.id)}
               >
                 <span className="history-title">{chat.title}</span>
                 <span className="history-date">{formatTime(chat.updated_at)}</span>
               </button>
             ))}
 
-            {!chats.length ? (
-              <div className="history-empty">No saved chats yet.</div>
-            ) : null}
+            {!chats.length ? <div className="history-empty">No saved chats yet.</div> : null}
           </div>
         </div>
       </aside>
@@ -612,6 +612,16 @@ export default function App() {
                 ))}
               </select>
             </label>
+            <label className="model-picker">
+              <span>Theme</span>
+              <select
+                value={theme}
+                onChange={(event) => setTheme(event.target.value as "light" | "dark")}
+              >
+                <option value="light">Light mode</option>
+                <option value="dark">Dark mode</option>
+              </select>
+            </label>
           </div>
         </header>
 
@@ -633,7 +643,9 @@ export default function App() {
                   className={`message-card ${isUser ? "from-user" : "from-assistant"}`}
                 >
                   <p className="message-role">{isUser ? "You" : "NovaScribe"}</p>
-                  <p className="message-content">{msg.content || "..."}</p>
+                  <div className="message-content">
+                    {msg.content ? renderMessageContent(msg.content) : "..."}
+                  </div>
                 </article>
               );
             })}
@@ -657,7 +669,7 @@ export default function App() {
               <div className="composer-actions">
                 <button
                   type="button"
-                  onClick={handleSend}
+                  onClick={() => void handleSend()}
                   disabled={isStreaming || !input.trim()}
                   className="send-button"
                 >
