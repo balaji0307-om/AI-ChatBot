@@ -31,7 +31,12 @@ for proxy_var in (
 
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").strip()
-MONGODB_URI = os.getenv("MONGODB_URI").strip()
+MONGODB_URI = os.getenv("MONGODB_URI")
+
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI is not set")
+
+MONGODB_URI = MONGODB_URI.strip()
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "nova_scribe").strip()
 
 SYSTEM_INSTRUCTION = """You are NovaScribe, a helpful AI assistant in a chat app.
