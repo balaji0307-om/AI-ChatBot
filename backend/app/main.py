@@ -605,7 +605,7 @@ def get_chat(
     return _serialize_chat(document, include_messages=True)
 
 
-@app.post("/api/chats/{chat_id}/messages/stream")
+@app.post("/api/chats/{chat_id}/messages")
 async def send_message(
     chat_id: str,
     payload: SendMessageRequest,
@@ -615,44 +615,42 @@ async def send_message(
     user = _get_user_or_401(x_session_token, authorization)
     document = _get_chat_or_404(chat_id, str(user["_id"]))
     model_name = (payload.model or document.get("model") or DEFAULT_GEMINI_MODEL).strip()
-    return StreamingResponse(
-        _stream_chat_reply(
-            chat_id=chat_id,
-            owner_id=str(user["_id"]),
-            user_message=payload.content,
-            model_name=model_name,
-            temperature=payload.temperature,
-            simulate_stream=payload.simulate_stream,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
+    answer = ""
 
-@app.post("/api/chat/stream")
+    async for chunk in _stream_chat_reply(
+        chat_id=chat_id,
+        owner_id=str(user["_id"]),
+        user_message=payload.content,
+        model_name=model_name,
+        temperature=payload.temperature,
+        simulate_stream=payload.simulate_stream,
+    ):
+        answer += chunk
+
+    return {"response": answer}
+
+@app.post("/api/chat")
 async def chat_stream(payload: ChatRequest):
     try:
         model_name = (payload.model or DEFAULT_GEMINI_MODEL).strip()
-        prompt = _build_prompt([{"role": msg.role, "content": msg.content} for msg in payload.messages])
+        prompt = _build_prompt([
+            {"role": msg.role, "content": msg.content}
+            for msg in payload.messages
+        ])
 
-        return StreamingResponse(
-            _stream_prompt_as_sse(
-                prompt=prompt,
-                model_name=model_name,
-                temperature=payload.temperature,
-                simulate_stream=payload.simulate_stream,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
+        answer = ""
+
+        async for chunk in _stream_prompt_as_sse(
+            prompt=prompt,
+            model_name=model_name,
+            temperature=payload.temperature,
+            simulate_stream=payload.simulate_stream,
+        ):
+            answer += chunk
+
+        return {"response": answer}
+
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except Exception as exc:
