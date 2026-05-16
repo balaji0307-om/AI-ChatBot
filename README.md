@@ -134,6 +134,15 @@ Create `backend/.env` from `backend/.env.example`.
 GEMINI_API_KEY=your_single_key_here
 GEMINI_API_KEYS=key_one,key_two,key_three
 GEMINI_MODEL=gemini-2.5-flash
+JWT_SECRET=replace_with_a_long_random_secret
+JWT_ISSUER=novascribe-api
+ACCESS_TOKEN_MINUTES=30
+REFRESH_TOKEN_DAYS=30
+RATE_LIMIT_PER_MINUTE=60
+REDIS_URL=
+RAG_ENABLED=true
+RAG_TOP_K=4
+VECTOR_DIMENSIONS=64
 FRONTEND_ORIGIN=http://localhost:5173
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=nova_scribe
@@ -144,6 +153,8 @@ Notes:
 - Use `GEMINI_API_KEYS` for multiple-key fallback.
 - If both are present, the backend prefers `GEMINI_API_KEYS`.
 - For multiple-key fallback to be useful, use keys from different Google projects when possible.
+- `REDIS_URL` is optional. When empty, rate limiting and cache helpers fall back to in-process memory for local development.
+- Set a stable `JWT_SECRET` in production so access tokens remain valid across deploys.
 - For deployed frontend + local frontend together, separate allowed origins with commas, for example `FRONTEND_ORIGIN=http://localhost:5173,https://your-frontend-domain.com`.
 
 Create `frontend/.env` from `frontend/.env.example`.
@@ -204,6 +215,7 @@ Then open:
 
 - `POST /api/auth/signup`
 - `POST /api/auth/login`
+- `POST /api/auth/refresh`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
 
@@ -213,6 +225,18 @@ Then open:
 - `POST /api/chats`
 - `GET /api/chats/{chat_id}`
 - `POST /api/chats/{chat_id}/messages/stream`
+
+### Memory and Jobs
+
+- `GET /api/memories`
+- `POST /api/memories`
+- `DELETE /api/memories/{memory_id}`
+- `GET /api/jobs`
+- `POST /api/jobs`
+
+### Admin
+
+- `GET /api/admin/users` requires a user with role `admin`.
 
 ### System
 
@@ -226,7 +250,10 @@ This project is now suitable to explain in interviews for a full-stack AI role:
 - Built a React + TypeScript frontend with Zustand for app-wide state.
 - Designed a FastAPI backend for auth, chat persistence, and AI streaming.
 - Added MongoDB persistence with indexes for search and retrieval.
-- Implemented session-token authentication instead of a temporary user-id header approach.
+- Implemented JWT access tokens with refresh-token rotation while preserving the existing session token response for compatibility.
+- Added optional Redis-backed rate limiting and cache helpers with local in-memory fallback.
+- Added a lightweight vector-memory/RAG layer and background job endpoint for chat-summary memory ingestion.
+- Added a simple RBAC guard for admin-only endpoints.
 - Integrated Gemini with multi-key fallback and graceful failure handling.
 - Added Dockerized local deployment for frontend, backend, and database.
 
