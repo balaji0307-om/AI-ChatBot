@@ -30,7 +30,20 @@ for proxy_var in (
         os.environ.pop(proxy_var, None)
 
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").strip()
+LOCAL_FRONTEND_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+CONFIGURED_FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+FRONTEND_ORIGINS = list(dict.fromkeys([*CONFIGURED_FRONTEND_ORIGINS, *LOCAL_FRONTEND_ORIGINS]))
 MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
 
 if not MONGODB_URI:
@@ -70,7 +83,7 @@ app = FastAPI(title="NovaScribe API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN, "http://localhost:3000"],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -137,6 +150,15 @@ def _create_indexes() -> None:
 
 
 _create_indexes()
+
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "product_name": "NovaScribe",
+        "message": "NovaScribe API is running. Use /api/health for health checks.",
+    }
 
 
 def _hash_password(password: str, salt: str | None = None) -> str:
@@ -629,6 +651,31 @@ async def send_message(
         answer += chunk
 
     return {"response": answer}
+
+
+@app.post("/api/chats/{chat_id}/messages/stream")
+async def stream_message(
+    chat_id: str,
+    payload: SendMessageRequest,
+    x_session_token: str | None = Header(default=None, alias="X-Session-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    user = _get_user_or_401(x_session_token, authorization)
+    document = _get_chat_or_404(chat_id, str(user["_id"]))
+    model_name = (payload.model or document.get("model") or DEFAULT_GEMINI_MODEL).strip()
+
+    return StreamingResponse(
+        _stream_chat_reply(
+            chat_id=chat_id,
+            owner_id=str(user["_id"]),
+            user_message=payload.content,
+            model_name=model_name,
+            temperature=payload.temperature,
+            simulate_stream=payload.simulate_stream,
+        ),
+        media_type="text/event-stream",
+    )
+
 
 @app.post("/api/chat")
 async def chat_stream(payload: ChatRequest):

@@ -144,6 +144,15 @@ Notes:
 - Use `GEMINI_API_KEYS` for multiple-key fallback.
 - If both are present, the backend prefers `GEMINI_API_KEYS`.
 - For multiple-key fallback to be useful, use keys from different Google projects when possible.
+- For deployed frontend + local frontend together, separate allowed origins with commas, for example `FRONTEND_ORIGIN=http://localhost:5173,https://your-frontend-domain.com`.
+
+Create `frontend/.env` from `frontend/.env.example`.
+
+```env
+VITE_API_URL=http://127.0.0.1:9000
+```
+
+For the deployed frontend, set `VITE_API_URL` to your Render backend URL, for example `https://ai-chatbot-backend-k374.onrender.com`.
 
 ## Local Development
 
@@ -208,7 +217,7 @@ Then open:
 ### System
 
 - `GET /api/health`
-- `POST /api/chat/stream`
+- `POST /api/chat`
 
 ## Interview Talking Points
 

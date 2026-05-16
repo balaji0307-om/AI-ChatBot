@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { API_BASE, api } from "./api";
 import { useAppStore } from "./store";
 import type { ChatMessage } from "./types";
 
@@ -288,7 +288,7 @@ export default function App() {
     assistantId: string,
     signal: AbortSignal
   ) {
-    const response = await fetch(`/api/chats/${chatId}/messages/stream`, {
+    const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages/stream`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
