@@ -1,6 +1,6 @@
-# NovaScribe
+# 💬 NovaScribe AI Chat Workspace
 
-NovaScribe is a full-stack AI chat workspace built for the kind of role that expects modern frontend engineering, scalable FastAPI services, LLM integration, authentication, persistence, and production-minded architecture.
+A production-style full-stack AI chat platform built using React, TypeScript, FastAPI, MongoDB, and Gemini API.
 
 It now includes:
 
@@ -264,3 +264,11 @@ This project is now suitable to explain in interviews for a full-stack AI role:
 - Add route protection and role-based access
 - Add message pagination for large chat histories
 - Add cloud deployment on AWS or GCP
+
+- ---
+
+## 📸 Screenshot
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/4b0b51eb-ff23-45e4-82b9-0f02fca9c8cb" />
+
+
